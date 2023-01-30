@@ -2,71 +2,92 @@
 
 import SwiftUI
 import CoreData
+import UIKit
+import AVFoundation
+
+//let imageURL: URL = Bundle.main.url(forResource: "IMG_3255", withExtension: "jpg")!
+let tempPath = (NSTemporaryDirectory() as NSString).appendingPathComponent("movie.mp4")
+
 
 struct ContentView: View {
-    @Environment(\.managedObjectContext) private var viewContext
-
-    @FetchRequest(
-        sortDescriptors: [NSSortDescriptor(keyPath: \Item.timestamp, ascending: true)],
-        animation: .default)
-    private var items: FetchedResults<Item>
+    @State private var showingAlert = false
 
     var body: some View {
         NavigationView {
-            List {
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp!, formatter: itemFormatter)")
-                    } label: {
-                        Text(item.timestamp!, formatter: itemFormatter)
+            ZStack{
+                Image("IMG_3255").resizable().scaledToFill().ignoresSafeArea()
+                Button {
+                    let image = self.snapshot()
+                    try? FileManager.default.removeItem(atPath: tempPath)
+                    writeSingleImageToMovie(image: image, movieLength: 2, outputFileURL: URL(fileURLWithPath: tempPath)) { error in
+                        showingAlert = true
                     }
-                }
-                .onDelete(perform: deleteItems)
-            }
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    EditButton()
-                }
-                ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
+                } label: {
+                    Text("Click to generate video...").font(.title).foregroundColor(.white).bold()
+                }.alert("Video file generated at:\(tempPath), inspect it in simulator!", isPresented: $showingAlert) {
+                    Button("OK", role: .cancel) {
+                        UIPasteboard.general.string = tempPath
                     }
                 }
             }
-            Text("Select an item")
         }
     }
 
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(context: viewContext)
-            newItem.timestamp = Date()
-
+    
+    
+    func writeSingleImageToMovie(image: UIImage, movieLength: TimeInterval, outputFileURL: URL, completion: @escaping (Error?) -> ())
+         {
+            print("writeSingleImageToMovie is called")
+         
             do {
-                try viewContext.save()
-            } catch {
-                // Replace this implementation with code to handle the error appropriately.
-                // fatalError() causes the application to generate a crash log and terminate. You should not use this function in a shipping application, although it may be useful during development.
-                let nsError = error as NSError
-                fatalError("Unresolved error \(nsError), \(nsError.userInfo)")
-            }
-        }
-    }
+                let imageSize = image.size
+                let videoWriter = try AVAssetWriter(outputURL: outputFileURL, fileType: AVFileType.mp4)
+                let videoSettings: [String: Any] = [AVVideoCodecKey: AVVideoCodecType.h264,
+                                                    AVVideoWidthKey: imageSize.width, //was imageSize.width
+                                                    AVVideoHeightKey: imageSize.height] //was imageSize.height
+                
+              
+                let videoWriterInput = AVAssetWriterInput(mediaType: AVMediaType.video, outputSettings: videoSettings)
+                let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: videoWriterInput, sourcePixelBufferAttributes: nil)
+                
+                if !videoWriter.canAdd(videoWriterInput) { throw NSError() }
+                videoWriterInput.expectsMediaDataInRealTime = true
+                videoWriter.add(videoWriterInput)
+                
+                videoWriter.startWriting()
+                let timeScale: Int32 = 4 // 600 recommended in CMTime for movies.
+                _ = Float64(movieLength/2.0) // videoWriter assumes frame lengths are equal.
+                let startFrameTime = CMTimeMake(value: 0, timescale: timeScale)
+             
+                
+                let endFrameTime = CMTimeMakeWithSeconds(Double(60), preferredTimescale: timeScale)
+                                                      
+                videoWriter.startSession(atSourceTime: startFrameTime)
+              
+             
+                
+            guard let cgImage = image.cgImage else { throw NSError() }
+                 
+         
+                let buffer: CVPixelBuffer = try CGImage.pixelBuffer(fromImage: cgImage, size: imageSize)
 
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            offsets.map { items[$0] }.forEach(viewContext.delete)
-
-            do {
-                try viewContext.save()
+                while !adaptor.assetWriterInput.isReadyForMoreMediaData { usleep(10) }
+                adaptor.append(buffer, withPresentationTime: startFrameTime)
+                while !adaptor.assetWriterInput.isReadyForMoreMediaData { usleep(10) }
+                adaptor.append(buffer, withPresentationTime: endFrameTime)
+                
+                videoWriterInput.markAsFinished()
+                videoWriter.finishWriting
+                {
+                    completion(videoWriter.error)
+                }
+                
             } catch {
-                // Replace this implementation with code to handle the error appropriately.
-                // fatalError() causes the application to generate a crash log and terminate. You should not use this function in a shipping application, although it may be useful during development.
-                let nsError = error as NSError
-                fatalError("Unresolved error \(nsError), \(nsError.userInfo)")
+                print("CATCH Error in writeSingleImageToMovie")
+                completion(error)
             }
-        }
     }
+    
 }
 
 private let itemFormatter: DateFormatter = {
@@ -78,6 +99,58 @@ private let itemFormatter: DateFormatter = {
 
 struct ContentView_Previews: PreviewProvider {
     static var previews: some View {
-        ContentView().environment(\.managedObjectContext, PersistenceController.preview.container.viewContext)
+        ContentView()
     }
 }
+
+
+extension View {
+    func snapshot() -> UIImage {
+        let controller = UIHostingController(rootView: self.ignoresSafeArea(.all))
+        let view = controller.view
+
+    let targetSize = controller.view.intrinsicContentSize
+        view?.bounds = CGRect(origin: .zero, size: targetSize)
+        view?.backgroundColor = .clear
+    
+        let renderer = UIGraphicsImageRenderer(size: targetSize)
+
+        return renderer.image { _ in
+            view?.drawHierarchy(in: controller.view.bounds, afterScreenUpdates: true)
+        }
+        
+    }
+    
+}
+
+
+
+
+extension CGImage {
+ 
+    static func pixelBuffer(fromImage image: CGImage, size: CGSize) throws -> CVPixelBuffer {
+        print("pixelBuffer from CGImage")
+        let options: CFDictionary = [kCVPixelBufferCGImageCompatibilityKey as String: true, kCVPixelBufferCGBitmapContextCompatibilityKey as String: true] as CFDictionary
+        var pxbuffer: CVPixelBuffer? = nil
+        let status = CVPixelBufferCreate(kCFAllocatorDefault, Int(size.width), Int(size.height), kCVPixelFormatType_32ARGB, options, &pxbuffer)
+        guard let buffer = pxbuffer, status == kCVReturnSuccess else { throw NSError() }
+        
+        CVPixelBufferLockBaseAddress(buffer, [])
+        guard let pxdata = CVPixelBufferGetBaseAddress(buffer)
+        else { throw NSError() }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+        
+        let rgbColorSpace = CGColorSpaceCreateDeviceRGB()
+         
+            guard let context = CGContext(data: pxdata, width: Int(size.width), height: Int(size.height), bitsPerComponent: 8, bytesPerRow: bytesPerRow, space: rgbColorSpace, bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue) else { print("error in `CG context")
+                throw NSError() }
+        context.concatenate(CGAffineTransform(rotationAngle: 0))
+        context.draw(image, in: CGRect(x: 0, y: 0, width: size.width, height: size.height))
+        
+        CVPixelBufferUnlockBaseAddress(buffer, [])
+        
+        return buffer
+        }
+}
+
+
